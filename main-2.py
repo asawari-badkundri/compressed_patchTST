@@ -165,12 +165,11 @@ class Learner:
 
             prof.export_chrome_trace(os.path.join(results_dir, 'trace.json'))
 
-            test_loss = self.test(model)
             trainable, total = get_trainable_parameters(model)
             percent = (trainable/total) *100
 
             with open(os.path.join(results_dir, 'metrics.txt'), "w") as f:
-                f.write(f"Total training time: {total_time}s \nTest MSE: {test_loss} \nTrainable Params: {trainable}, {percent}% of total \nModel Size{print_model_size(model)} MB")
+                f.write(f"Total training time: {total_time}s \nTrainable Params: {trainable}, {percent}% of total \nModel Size {print_model_size(model)} MB")
 
         return model
     

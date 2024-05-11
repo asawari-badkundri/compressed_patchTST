@@ -1,4 +1,0 @@
-Total training time: 50.83484244346619s 
-Test MSE: 0.1338500033386729 
-Trainable Params: 36864, 4.3525026536050655% of total 
-Model Size3.424244 MB
