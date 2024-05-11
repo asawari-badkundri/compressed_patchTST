@@ -133,9 +133,6 @@ class Learner:
         logger.info(f"Training completed. Time taken: {execution_time_mins:.3f} mins")
         if args.profile == True:
             # Set up the directory for saving the results 
-            # profiling_directory = args.profile_dir
-            # if not os.path.exists('profiling_directory'):
-            #     os.makedirs('profiling_directory')
             results_dir = os.path.join('profiling_results', datetime.datetime.now().strftime('%Y_%m_%d_%H_%M'))
             os.makedirs(results_dir)
             
