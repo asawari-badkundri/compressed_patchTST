@@ -3,11 +3,17 @@ import argparse
 import logging
 import torch
 import numpy as np
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+import numpy as np
 import pandas as pd
 import loralib as lora
 from time import time
+import datetime
+import matplotlib.pyplot as plt
+import pandas as pd
 
-from data import CustomDataset
+from data2 import CustomDataset
 from model import PatchTST
 
 
@@ -42,7 +48,7 @@ class Learner:
     def test(self, model, dataloader=None):
         
         if dataloader is None:
-            dataloader = self.load_data(False, args.test_path)
+            dataloader = self.load_data(False, args.test_path, False)
 
         model.eval()
         criterion = torch.nn.MSELoss()
@@ -122,10 +128,57 @@ class Learner:
             val_history.append(val_loss)
 
         self.save_hist(train_history, val_history)
-        
-        logger.info(f"Training completed. Time taken: {(time()-start) / 60:.3f} mins")
-        return model
+        end = time() 
+        total_time = end-start
+        logger.info(f"Training completed. Time taken: {total_time / 60:.3f} mins")
 
+        if args.profile == True:
+            # Set up the directory for saving the results 
+            results_dir = os.path.join('profiling_results', datetime.datetime.now().strftime('%Y_%m_%d_%H_%M'))
+            os.makedirs(results_dir)
+            
+
+
+            data = { 'train_loss':train_history, 'valid_loss':val_history }
+            loss_df = pd.DataFrame(data)
+            loss_df.to_csv(os.path.join(results_dir, 'losses.csv'), index=False) 
+
+            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+            ax.plot(np.arange(1, args.epochs+1), val_history, label="validation", linestyle = '--', color = 'mediumvioletred')
+            ax.plot(np.arange(1, args.epochs+1), train_history, label="training", color = 'darkslateblue' )
+            ax.set_xlabel("epochs")
+            ax.set_ylabel("MSE Error")
+            ax.set_ylim(0,1)
+            ax.legend()
+            ax.figure.savefig(os.path.join(results_dir, 'loss_curves.png'))
+
+            input = next(iter(valloader))[0].to('cuda')
+
+            with profile(activities=[
+                    ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with record_function("model_inference"):
+                    model.eval()
+                    model(input)
+
+            with open(os.path.join(results_dir, 'profiler.txt'), "w") as f:
+                f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+            prof.export_chrome_trace(os.path.join(results_dir, 'trace.json'))
+
+            test_loss = self.test(model)
+            trainable, total = get_trainable_parameters(model)
+            percent = (trainable/total) *100
+
+            with open(os.path.join(results_dir, 'metrics.txt'), "w") as f:
+                f.write(f"Total training time: {total_time}s \nTest MSE: {test_loss} \nTrainable Params: {trainable}, {percent}% of total \nModel Size{print_model_size(model)} MB")
+
+        return model
+    
+def print_model_size(mdl):
+    torch.save(mdl.state_dict(), "tmp.pt")
+    size = os.path.getsize("tmp.pt")/1e6
+    os.remove('tmp.pt')
+    return size
 def create_logger(logging_dir):
     """
     Create a logger that writes to a log file and stdout.
@@ -172,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--target-window", type=int, default=96, help="Target window size")
     parser.add_argument("--patch-len", type=int, default=16, help="Path length")
     parser.add_argument("--stride", type=int, default=8, help="Stride")
+    parser.add_argument("--profile", type=bool, default=True, help="To produce profiling results")
 
     args = parser.parse_args()
 
@@ -183,8 +237,8 @@ if __name__ == "__main__":
     logger = create_logger(args.log_dir)
 
     # Choose GPU
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     learner = Learner(device)
 
@@ -194,6 +248,7 @@ if __name__ == "__main__":
     if args.mode == "train":
         args.train_path = f"{args.data_path}/train.csv"
         args.val_path = f"{args.data_path}/val.csv"
+        args.test_path = f"{args.data_path}/test.csv"
 
         model = learner.train(model)
         
@@ -203,6 +258,7 @@ if __name__ == "__main__":
     elif args.mode == "finetune":
         args.train_path = f"{args.data_path}/finetune.csv"
         args.val_path = f"{args.data_path}/val.csv"
+        args.test_path = f"{args.data_path}/test.csv"
 
         if args.lora:
             args.mode = f"{args.mode}-lora"
