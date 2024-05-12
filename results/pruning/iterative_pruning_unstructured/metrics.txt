@@ -1,0 +1,3 @@
+Total training time: 102.85815596580505s 
+Trainable Params: 810094, 99.99962967397731% of total 
+Model Size: 3.271986 MB
