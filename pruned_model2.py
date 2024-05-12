@@ -3,22 +3,30 @@ import argparse
 import logging
 import torch
 import numpy as np
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+import numpy as np
+import pandas as pd
 import loralib as lora
 from time import time
-
-from data import ETTDataset
-from model import PatchTST
+import datetime
+import matplotlib.pyplot as plt
+import pandas as pd
 import torch.nn.utils.prune as prune
+
+from data2 import CustomDataset
+from model import PatchTST
 
 class Learner:
     def __init__(self, device):
         
         self.device = device
     
-    def load_data(self, trainmode, data_path):
+    def load_data(self, trainmode, data_path, shuffle):
 
-        data = ETTDataset(data_path=data_path, trainmode=trainmode)
-        return torch.utils.data.DataLoader(data, batch_size=args.batch_size, shuffle=trainmode)
+        data = CustomDataset(data_path=data_path, trainmode=trainmode)
+        logger.info(f"Data loaded from {data_path}. Num samples: {len(data)}.")
+        return torch.utils.data.DataLoader(data, batch_size=args.batch_size, shuffle=shuffle)
 
     def adjust_learning_rate(self, steps, optimizer, warmup_step=300):
         if steps**(-0.5) < steps * (warmup_step**-1.5):
@@ -34,7 +42,7 @@ class Learner:
     def test(self, model, dataloader=None):
         model = model.to(self.device)
         if dataloader is None:
-            dataloader = self.load_data(False, args.test_path)
+            dataloader = self.load_data(False, args.test_path, False)
 
         model.eval()
         criterion = torch.nn.MSELoss()
@@ -57,8 +65,11 @@ class Learner:
         if args.lora:
             lora.mark_only_lora_as_trainable(model)
 
-        trainloader = self.load_data(True, args.train_path)
-        valloader = self.load_data(False, args.val_path)
+        trainloader = self.load_data(True, args.train_path, True)
+        valloader = self.load_data(True, args.val_path, False)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        criterion = torch.nn.MSELoss()
 
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         criterion = torch.nn.MSELoss()
@@ -72,11 +83,21 @@ class Learner:
             optimizer = self.adjust_learning_rate(train_steps, optimizer)
 
         logger.info("Starting training")
-        module = model.backbone.encoder.layers[0].self_attn.to_out[0]
-        prune.random_unstructured(module, name="weight", amount=0.5)
+        # module = model.backbone.encoder.layers[0].self_attn.to_out[0]
+        # prune.random_unstructured(module, name="weight", amount=0.5)
         start = time()
         for epoch in range(args.epochs):
             model.train()
+
+            if ((epoch+1)>20) and ((epoch+1)%5==0):  
+                for name, module in model.named_modules():
+                    # prune 10% of connections in all linear layers
+                    if isinstance(module, torch.nn.Linear):
+                        logger.info(f"Pruning module : {name}")
+                        module = model.backbone.encoder.layers[0].self_attn.to_out[0]
+                        prune.ln_structured(module, name="weight", amount=0.2, n=2, dim=0)
+                        # prune.random_unstructured(module, name="weight", amount=0.2)
+                        prune.remove(module, 'weight')
 
             epoch_loss = 0
             for inputs, targets in trainloader:
@@ -114,9 +135,55 @@ class Learner:
 
             train_history.append(epoch_loss)
             valid_history.append(val_loss)
-        
-        logger.info(f"Training completed. Time taken: {(time()-start) / 60:.3f} mins")
+
+        end = time() 
+        total_time = end-start
+        logger.info(f"Training completed. Time taken: {total_time / 60:.3f} mins")
+
+        if args.profile == True:
+            # Set up the directory for saving the results 
+            results_dir = os.path.join('profiling_results', datetime.datetime.now().strftime('%Y_%m_%d_%H_%M'))
+            os.makedirs(results_dir)
+            
+
+
+            data = { 'train_loss':train_history, 'valid_loss':valid_history }
+            loss_df = pd.DataFrame(data)
+            loss_df.to_csv(os.path.join(results_dir, 'losses.csv'), index=False) 
+
+            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+            ax.plot(np.arange(1, args.epochs+1), valid_history, label="validation", linestyle = '--', color = 'mediumvioletred')
+            ax.plot(np.arange(1, args.epochs+1), train_history, label="training", color = 'darkslateblue' )
+            ax.set_xlabel("epochs")
+            ax.set_ylabel("MSE Error")
+            ax.set_ylim(0,1)
+            ax.legend()
+            ax.figure.savefig(os.path.join(results_dir, 'loss_curves.png'))
+
+            input = next(iter(valloader))[0].to('cuda')
+
+            with profile(activities=[
+                    ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with record_function("model_inference"):
+                    model.eval()
+                    model(input)
+
+            with open(os.path.join(results_dir, 'profiler.txt'), "w") as f:
+                f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+            prof.export_chrome_trace(os.path.join(results_dir, 'trace.json'))
+
+            trainable, total = get_trainable_parameters(model)
+            percent = (trainable/total) *100
+
+            with open(os.path.join(results_dir, 'metrics.txt'), "w") as f:
+                f.write(f"Total training time: {total_time}s \nTrainable Params: {trainable}, {percent}% of total \nModel Size: {print_model_size(model)} MB")
         return model
+def print_model_size(mdl):
+    torch.save(mdl.state_dict(), "tmp.pt")
+    size = os.path.getsize("tmp.pt")/1e6
+    os.remove('tmp.pt')
+    return size
 
 def create_logger(logging_dir):
     """
@@ -157,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument("--log-dir", type=str, default="log", help="directory for the log file")
     parser.add_argument("--ckpt-dir", type=str, default="saved_models", help="directory to save model ckpt")
     parser.add_argument("--ckpt", type=str, default=None)
-    parser.add_argument("--data-path", type=str, default="data", help="Path to data files")
+    parser.add_argument("--data-path", type=str, default="dataset", help="Path to data files")
     parser.add_argument("--epochs", type=int, default=5, help="Num epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch Size")
@@ -170,10 +237,11 @@ if __name__ == "__main__":
     parser.add_argument("--target-window", type=int, default=96, help="Target window size")
     parser.add_argument("--patch-len", type=int, default=16, help="Path length")
     parser.add_argument("--stride", type=int, default=8, help="Stride")
+    parser.add_argument("--profile", type=bool, default=True, help="To produce profiling results")
 
     args = parser.parse_args()
 
-    assert os.path.exists(args.data_path), f"{args.train_path} does not exist"
+    assert os.path.exists(args.data_path), f"{args.data_path} does not exist"
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
